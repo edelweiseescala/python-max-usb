@@ -8,17 +8,14 @@ Main Functions:
 - read_register_8bit():  Read from I2C devices with 8-bit register addressing
 - read_register_16bit(): Read from I2C EEPROMs with 16-bit addressing
 - scan_i2c_devices():    Scan for all I2C devices on the bus
-- read_eeprom_to_file(): Read entire EEPROM and save to binary file
-- compare_binary_files(): Compare two binary files byte-by-byte
-
-Usage:
-1. Connect FTDI device to I2C EEPROM
-2. Run script to read EEPROM contents
-3. Compare with original.bin if available
+- read_eeprom_to_file(): Read entire EEPROM and save to binary
+- compare_binary_files():Compare two binary files byte-by-byte
+- parse_rpi_hat_eeprom():Read entire EEPROM and prints if it follows R-Pi HAT+ format
 """
 
 import ctypes
 import time
+import os
 from enum import Enum
 
 #Constants for FTDI config
@@ -89,7 +86,9 @@ def status(code):
 
 class MaxUsbTool:
 	def __init__(self):
-		self.libMPSSE = ctypes.cdll.LoadLibrary('./libMPSSE.dll')
+		script_dir = os.path.dirname(os.path.abspath(__file__))
+		dll_path = os.path.join(script_dir, 'libmpsse.dll')
+		self.libMPSSE = ctypes.cdll.LoadLibrary(dll_path)
 		self.slave_address = 0x0
 		print('Loaded MPSSE library')
 
@@ -254,7 +253,9 @@ class MaxUsbTool:
 	def read_eeprom_to_file(self, start_addr, size, should_save=False, filename="eeprom_readback.bin"):
 		"""
 		Read entire EEPROM content and save to a binary file.
-		Uses 16-bit addressing for EEPROMs that require it.
+		Uses 16-bit addressing with REPEATED START for EEPROMs that require it.
+		Reads in 256-byte aligned blocks for reliability.
+		Implements verification read to ensure fresh data from EEPROM (not cached).
 		
 		Args:
 			start_addr: Starting register address (usually 0x00)
@@ -265,45 +266,34 @@ class MaxUsbTool:
 		Returns:
 			tuple: (status_code, bytes_read)
 		"""
-		write_buf = (ctypes.c_ubyte * 2)()
-		write_buf[0] = (start_addr >> 8) & 0xFF
-		write_buf[1] = start_addr & 0xFF
-		bytes_written = ctypes.c_ulong()
-
-		ret = self.libMPSSE.I2C_DeviceWrite(self.channel.handle, self.slave_address, 
-											2, write_buf,
-											ctypes.byref(bytes_written),
-											START_BIT | FAST_TRANSFER_BYTES)
-		if ret != 0:
-			print(f'Error setting EEPROM address pointer (status {status(ret)})')
-			return (ret, b'')
-
-		time.sleep(0.01)
-
 		print(f'\nReading {size} bytes from EEPROM at address 0x{self.slave_address:02x} using 16-bit addressing...')
+		read_size = max(256, ((size + 255) // 256) * 256)
 
-		read_buf = (ctypes.c_ubyte * size)()
-		bytes_read = ctypes.c_ulong()
+		max_attempts = 6
+		for attempt in range(max_attempts):
+			time.sleep(0.2)
+			ret, data_list = self.read_register_16bit(start_addr, read_size)
+			
+			if ret == 0 and data_list is not None and len(data_list) >= 4:
+				signature = bytes(data_list[0:4])
+				signature_adi = bytes(data_list[0:6])
+				if signature == b'R-Pi' or signature_adi == b'ADISDP' or signature == b'\xff\xff\xff\xff' or attempt == max_attempts - 1:
+					break
+			elif ret != 0:
+				print(f'  Error reading EEPROM')
+				return (1, b'')
 
-		ret = self.libMPSSE.I2C_DeviceRead(self.channel.handle, self.slave_address, size, read_buf, 
-									ctypes.byref(bytes_read), 
-									START_BIT | STOP_BIT | FAST_TRANSFER_BYTES)
-
-		if ret != 0:
-			print(f'  Error reading EEPROM (status {status(ret)})')
-			return (ret, b'')
-
-		all_data = list(read_buf[:bytes_read.value])
+		all_data = bytes(data_list[:size])
 		print(f'  Progress: 100.0%')
 
 		if (should_save == False):
-			return (0, bytes(all_data))
+			return (0, all_data)
 
 		with open(filename, 'wb') as f:
-			f.write(bytes(all_data))
+			f.write(all_data)
 
 		print(f'  Saved {len(all_data)} bytes to {filename}')
-		return (0, bytes(all_data))
+		return (0, all_data)
 
 	def compare_binary_files(self, file1, file2):
 		"""Compare two binary files byte by byte and display all data"""
@@ -385,8 +375,14 @@ class MaxUsbTool:
 		except FileNotFoundError:
 			print(f'Error: File "{filename}" not found')
 			return (1, 0)
-		
-		print(f'\nWriting {len(data)} bytes from {filename} to EEPROM at address 0x{self.slave_address:02x}...')
+
+		original_size = len(data)
+		padded_size = max(256, ((original_size + 255) // 256) * 256)
+		if padded_size > original_size:
+			data = data + bytes([0xFF] * (padded_size - original_size))
+			print(f'\nWriting {original_size} bytes (padded to {padded_size} bytes) from {filename} to EEPROM at address 0x{self.slave_address:02x}...')
+		else:
+			print(f'\nWriting {len(data)} bytes from {filename} to EEPROM at address 0x{self.slave_address:02x}...')
 		
 		page_size = 32  # 24C32 EEPROM has 32-byte pages
 		total_written = 0
@@ -395,7 +391,7 @@ class MaxUsbTool:
 		while addr < start_addr + len(data):
 			if addr >= 0x40 and addr == 0x40:
 				print(f'\n  [INFO] Waiting before writing to address 0x{addr:04x}...')
-				time.sleep(0.1)  # 100ms delay before crossing the 64-byte boundary
+				time.sleep(0.1)
 			
 			page_start = (addr // page_size) * page_size
 			page_end = page_start + page_size
@@ -407,8 +403,8 @@ class MaxUsbTool:
 			page_data = data[offset:offset + bytes_to_write]
 
 			write_buf = (ctypes.c_ubyte * (2 + bytes_to_write))()
-			write_buf[0] = (addr >> 8) & 0xFF  # Address MSB
-			write_buf[1] = addr & 0xFF          # Address LSB
+			write_buf[0] = (addr >> 8) & 0xFF
+			write_buf[1] = addr & 0xFF
 			for i, byte in enumerate(page_data):
 				write_buf[2 + i] = byte
 
@@ -432,9 +428,10 @@ class MaxUsbTool:
 			addr += bytes_to_write
 
 		print(f'  Progress: 100.0%')
-		print(f'  Successfully wrote {total_written} bytes to EEPROM')
+		print(f'  Successfully wrote {original_size} bytes to EEPROM (padded to {len(data)} bytes)')
 		
-		return (0, total_written)
+		return (0, original_size)
+
 
 	def verify_eeprom_write(self, start_addr, filename):
 		"""
@@ -455,37 +452,47 @@ class MaxUsbTool:
 			return False
 		
 		print(f'\nVerifying {len(original_data)} bytes...')
-		
-		time.sleep(0.1)
 
-		ret, all_data = self.read_register_16bit(start_addr, num_bytes=len(original_data))
-		
-		if ret != 0:
-			print(f'  Error reading EEPROM (status {status(ret)})')
-			return False
+		max_attempts = 6
+		for attempt in range(max_attempts):
+			time.sleep(1.0)
+			
+			read_size = max(256, ((len(original_data) + 255) // 256) * 256)
+			ret, data_list = self.read_register_16bit(start_addr, num_bytes=read_size)
+			readback_data = bytes(data_list[:len(original_data)])
+			if ret != 0:
+				print(f'  Error reading EEPROM (status {status(ret)})')
+				if attempt == max_attempts - 1:
+					return False
+				continue
+			mismatches = []
+			for i, (orig, read) in enumerate(zip(original_data, readback_data)):
+				if orig != read:
+					mismatches.append((i, orig, read))
 
-		readback_data = bytes(all_data)
-		mismatches = []
-		
-		for i, (orig, read) in enumerate(zip(original_data, readback_data)):
-			if orig != read:
-				mismatches.append((i, orig, read))
+			if not mismatches:
+				break
+			elif attempt < max_attempts - 1:
+				print(f'  Read attempt {attempt + 1} had {len(mismatches)} mismatches, retrying...')
 
 		if not mismatches:
 			print(f'[OK] Verification passed! All {len(original_data)} bytes match.')
 			return True
 		else:
 			print(f'[ERROR] Verification failed! {len(mismatches)} bytes differ:')
-			for addr, orig, read in mismatches[:10]:  # Show first 10 differences
+			for addr, orig, read in mismatches[:10]:
 				print(f'  Address 0x{addr:04x}: Expected 0x{orig:02x}, Read 0x{read:02x}')
 			if len(mismatches) > 10:
 				print(f'  ... and {len(mismatches) - 10} more differences')
 			return False
 
+
 	def parse_rpi_hat_eeprom(self, start_addr, size):
 		"""
 		Parse and display Raspberry Pi HAT EEPROM contents.
 		Uses 16-bit addressing for EEPROMs that require it.
+		Reads in 256-byte aligned blocks for reliability.
+		Implements verification read to ensure fresh data from EEPROM.
 		
 		Args:
 			start_addr: Starting register address (usually 0x00)
@@ -494,8 +501,22 @@ class MaxUsbTool:
 		Returns:
 			int: status_code (0 for success)
 		"""
-		print(f'\nReading {size} bytes from EEPROM for parsing...')
-		ret, eeprom_data = self.read_register_16bit(start_addr, num_bytes=size)
+		read_size = max(256, ((size + 255) // 256) * 256)
+		max_attempts = 6
+		for attempt in range(max_attempts):
+			time.sleep(0.2)
+			ret, eeprom_data = self.read_register_16bit(start_addr, num_bytes=read_size)
+			
+			if ret == 0 and len(eeprom_data) >= 4:
+				signature = bytes(eeprom_data[0:4])
+				if signature == b'R-Pi':
+					break
+				elif signature == b'\xff\xff\xff\xff':
+					break
+				elif attempt == max_attempts - 1:
+					break
+			elif ret != 0:
+				return ret
 
 		if ret != 0:
 			print(f'Error reading EEPROM (status {status(ret)})')
@@ -531,15 +552,19 @@ class MaxUsbTool:
 				curr_address = curr_address + 8
 
 				if (atom_header["atom_type"] == 1):
-					uuid = bytes(eeprom_data[curr_address:curr_address+16])
-					product_id = eeprom_data[curr_address+16]
-					product_version = eeprom_data[curr_address+18]
+					l_idx = curr_address
+					r_idx = curr_address+16
+					uuid = bytes(eeprom_data[l_idx:r_idx])
+					product_id = eeprom_data[r_idx]
+					product_version = eeprom_data[r_idx + 2]
 					print(f"Product ID: {product_id}")
 					print(f"Product Version: {product_version}")
 					vendor_len = eeprom_data[curr_address+20]
 					product_len = eeprom_data[curr_address+21]
-					vendor = bytes(eeprom_data[curr_address+22:curr_address+22+vendor_len])
-					product = bytes(eeprom_data[curr_address+22+vendor_len:curr_address+22+vendor_len+product_len])
+					l_idx = curr_address+22
+					r_idx = curr_address+22+vendor_len
+					vendor = bytes(eeprom_data[l_idx:r_idx])
+					product = bytes(eeprom_data[l_idx+vendor_len:r_idx+product_len])
 					print(f"Vendor: {vendor}")
 					print(f"Board: {product}")
 				elif (atom_header["atom_type"] == 3):
