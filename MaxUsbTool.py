@@ -531,8 +531,9 @@ class MaxUsbTool:
 				'signature': signature.decode('ascii'),
 				'version': eeprom_data[4],
 				'reserved': eeprom_data[5],
-				'numatoms': (eeprom_data[6]),
-				'eeplen': (eeprom_data[8])
+				'numatoms': eeprom_data[6] | (eeprom_data[7] << 8),
+				'eeplen': eeprom_data[8] | (eeprom_data[9] << 8) |
+				 (eeprom_data[10] << 16) | (eeprom_data[11] << 24)
 			}
 			
 			print(f'\nHeader Info:')
@@ -540,43 +541,76 @@ class MaxUsbTool:
 			print(f'  Version: 0x{header["version"]:02x}')
 			print(f'  Number of Atoms: {header["numatoms"]}')
 			print(f'  EEPROM Length: {header["eeplen"]} bytes')
-			
-			curr_atom = 0
-			curr_address = 12
-			while (curr_atom < header["numatoms"]):
-				atom_header = {
-					'atom_type': eeprom_data[curr_address],
-					'atom_count': eeprom_data[curr_address+2],
-					'dlen': eeprom_data[curr_address+4]
-				}
-				curr_address = curr_address + 8
 
-				if (atom_header["atom_type"] == 1):
-					l_idx = curr_address
-					r_idx = curr_address+16
-					uuid = bytes(eeprom_data[l_idx:r_idx])
-					product_id = eeprom_data[r_idx]
-					product_version = eeprom_data[r_idx + 2]
+			ATOM_HEADER_SIZE = 8
+			FIRST_ATOM_OFFSET = 12
+
+			ATOM_TYPE_VENDOR_INFO = 1
+			ATOM_TYPE_GPIO_MAP = 2
+			ATOM_TYPE_DT_OVERLAY = 3
+			ATOM_TYPE_CUSTOM = 4
+
+			curr_address = FIRST_ATOM_OFFSET
+			
+			for atom_num in range(header["numatoms"]):
+				atom_type = eeprom_data[curr_address] | (eeprom_data[curr_address + 1] << 8)
+				atom_count = eeprom_data[curr_address + 2] | (eeprom_data[curr_address + 3] << 8)
+				atom_dlen = (eeprom_data[curr_address + 4] | 
+							(eeprom_data[curr_address + 5] << 8) | 
+							(eeprom_data[curr_address + 6] << 16) | 
+							(eeprom_data[curr_address + 7] << 24))
+
+				data_start = curr_address + ATOM_HEADER_SIZE
+				
+				if atom_type == ATOM_TYPE_VENDOR_INFO:
+
+					uuid = bytes(eeprom_data[data_start:data_start + 16])
+					product_id = eeprom_data[data_start + 16] | (eeprom_data[data_start + 17] << 8)
+					product_version = eeprom_data[data_start + 18] | (eeprom_data[data_start + 19] << 8)
+					vendor_len = eeprom_data[data_start + 20]
+					product_len = eeprom_data[data_start + 21]
+					
+					vendor_start = data_start + 22
+					vendor = bytes(eeprom_data[vendor_start:vendor_start + vendor_len])
+					
+					product_start = vendor_start + vendor_len
+					product = bytes(eeprom_data[product_start:product_start + product_len])
+					
 					print(f"Product ID: {product_id}")
 					print(f"Product Version: {product_version}")
-					vendor_len = eeprom_data[curr_address+20]
-					product_len = eeprom_data[curr_address+21]
-					l_idx = curr_address+22
-					r_idx = curr_address+22+vendor_len
-					vendor = bytes(eeprom_data[l_idx:r_idx])
-					product = bytes(eeprom_data[l_idx+vendor_len:r_idx+product_len])
 					print(f"Vendor: {vendor}")
 					print(f"Board: {product}")
-				elif (atom_header["atom_type"] == 3):
-					overlay = bytes(eeprom_data[curr_address:curr_address+atom_header["dlen"] - 2])
-					print(f"{overlay}")
-				elif (atom_header["atom_type"] == 4):
-					print("custom")
-				else:
-					print(F'not supported {atom_header["atom_type"]}')
+					
+				elif atom_type == ATOM_TYPE_DT_OVERLAY:
+					overlay_len = atom_dlen - 2
+					overlay = bytes(eeprom_data[data_start:data_start + overlay_len])
+					print(f"Device Tree Overlay: {overlay}")
+					
+				elif atom_type == ATOM_TYPE_GPIO_MAP:
+					print("GPIO Map (not yet implemented)")
+					
+				elif atom_type == ATOM_TYPE_CUSTOM:
+					custom_data_len = atom_dlen - 2
+					custom_data = bytes(eeprom_data[data_start:data_start + custom_data_len])
+					
+					print(f'Custom Data ({custom_data_len} bytes):')
 
-				curr_atom += 1
-				curr_address = curr_address + atom_header["dlen"]
+					try:
+						import json
+						custom_data_str = custom_data.decode('utf-8').rstrip('\x00')
+						custom_data_json = json.loads(custom_data_str)
+						print(f'    JSON Parsed:')
+						print(json.dumps(custom_data_json, indent=6))
+					except:
+						print(f'    Hex: {custom_data.hex()}')
+						ascii_repr = ''.join(chr(b) if 32 <= b < 127 else '.' for b in custom_data)
+						print(f'    ASCII: {ascii_repr}')
+					
+				else:
+					print(f"Unknown atom type: {atom_type}")
+
+				curr_address += ATOM_HEADER_SIZE + atom_dlen
+				
 			return ret
 		else:
 			print('Not a valid Raspberry Pi HAT EEPROM format')
