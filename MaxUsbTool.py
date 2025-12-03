@@ -487,6 +487,65 @@ class MaxUsbTool:
 			return False
 
 
+	def erase_evb_eeprom(self, bytes_to_erase=256):
+		"""
+		Erase EEPROM by writing 0xFF to all bytes.
+		
+		Args:
+			bytes_to_erase: Number of bytes to erase (default: 256)
+		
+		Returns:
+			int: 0 on success, error code on failure
+		"""
+		print(f'\nErasing {bytes_to_erase} bytes of EEPROM at address 0x{self.slave_address:02x}...')
+		
+		erase_data = bytes([0xFF] * bytes_to_erase)
+		
+		page_size = 32
+		total_written = 0
+		
+		addr = 0x00
+		while addr < bytes_to_erase:
+			page_start = (addr // page_size) * page_size
+			page_end = page_start + page_size
+			bytes_remaining_in_page = page_end - addr
+
+			bytes_remaining_total = bytes_to_erase - addr
+			bytes_to_write = min(bytes_remaining_in_page, bytes_remaining_total)
+
+			write_buf = (ctypes.c_ubyte * (2 + bytes_to_write))()
+			write_buf[0] = (addr >> 8) & 0xFF
+			write_buf[1] = addr & 0xFF
+			for i in range(bytes_to_write):
+				write_buf[2 + i] = 0xFF
+
+			bytes_written = ctypes.c_ulong()
+			ret = self.libMPSSE.I2C_DeviceWrite(
+				self.channel.handle, 
+				self.slave_address, 
+				2 + bytes_to_write, 
+				write_buf,
+				ctypes.byref(bytes_written), 
+				START_BIT | STOP_BIT | FAST_TRANSFER_BYTES
+			)
+
+			if ret != 0:
+				print(f'\n  Error erasing at address 0x{addr:04x} (status {status(ret)})')
+				return ret
+
+			total_written += bytes_to_write
+			time.sleep(0.01)
+
+			if addr % 64 == 0 or total_written == bytes_to_erase:
+				progress = total_written / bytes_to_erase * 100
+				print(f'  Progress: {progress:.1f}%', end='\r')
+
+			addr += bytes_to_write
+
+		print(f'[OK] Successfully erased {bytes_to_erase} bytes')
+		return 0
+
+
 	def parse_rpi_hat_eeprom(self, start_addr, size):
 		"""
 		Parse and display Raspberry Pi HAT EEPROM contents.
