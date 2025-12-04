@@ -383,10 +383,13 @@ class MaxUsbTool:
 			print(f'\nWriting {original_size} bytes (padded to {padded_size} bytes) from {filename} to EEPROM at address 0x{self.slave_address:02x}...')
 		else:
 			print(f'\nWriting {len(data)} bytes from {filename} to EEPROM at address 0x{self.slave_address:02x}...')
-		
+
 		page_size = 32  # 24C32 EEPROM has 32-byte pages
 		total_written = 0
-		
+
+		self.erase_evb_eeprom(padded_size)
+		time.sleep(0.1)
+
 		addr = start_addr
 		while addr < start_addr + len(data):
 			if addr >= 0x40 and addr == 0x40:
