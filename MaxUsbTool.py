@@ -714,3 +714,43 @@ class MaxUsbTool:
 		else:
 			print('Not a valid Raspberry Pi HAT EEPROM format')
 			return ret
+
+
+	def parse_rpi_hat_eeprom_dll(self, start_addr, size):
+		"""
+		Parse and display Raspberry Pi HAT EEPROM contents using the C DLL parser.
+		
+		Uses 16-bit addressing for EEPROMs that require it.
+		Reads in 256-byte aligned blocks for reliability.
+		Implements verification read to ensure fresh data from EEPROM.
+		
+		Args:
+			start_addr: Starting register address (usually 0x00)
+			size: Number of bytes to read (EEPROM size, e.g., 256, 512, 1024, etc.)
+		
+		Returns:
+			int: status_code (0 for success, negative for error)
+		"""
+		try:
+			from rpihatparser import parse_and_print_eeprom, PARSE_OK, get_parse_error_message
+		except ImportError as e:
+			print(f'Error: Could not import DLL parser: {e}')
+			print('Make sure the rpihatparser folder with rpi_hat_parser.dll is in the same directory.')
+			print('Falling back to Python parser...\n')
+			return self.parse_rpi_hat_eeprom(start_addr, size)
+		
+		# Read EEPROM data
+		ret, eeprom_data = self.read_eeprom_to_file(start_addr, size, should_save=False)
+		
+		if ret != 0:
+			print(f'Error reading EEPROM (status {status(ret)})')
+			return ret
+		
+		# Parse using the DLL
+		status_code = parse_and_print_eeprom(eeprom_data)
+		
+		if status_code != PARSE_OK:
+			error_msg = get_parse_error_message(status_code)
+			print(f'\n{error_msg}')
+		
+		return status_code
