@@ -5,13 +5,15 @@ This script provides functions to read and write I2C EEPROM devices using FTDI c
 Supports both 8-bit and 16-bit addressing modes.
 
 Main Functions:
-- read_register_8bit():  Read from I2C devices with 8-bit register addressing
-- read_register_16bit(): Read from I2C EEPROMs with 16-bit addressing
-- scan_i2c_devices():    Scan for all I2C devices on the bus
-- read_eeprom_to_file(): Read entire EEPROM and save to binary
-- compare_binary_files():Compare two binary files byte-by-byte
-- parse_rpi_hat_eeprom():Read entire EEPROM and prints if it follows R-Pi HAT+ format
+- read_register_8bit():      Read from I2C devices with 8-bit register addressing
+- read_register_16bit():     Read from I2C EEPROMs with 16-bit addressing
+- scan_i2c_devices():        Scan for all I2C devices on the bus
+- read_eeprom_to_file():     Read entire EEPROM and save to binary
+- compare_binary_files():    Compare two binary files byte-by-byte
+- parse_rpi_hat_eeprom():    Read and parse RPi HAT EEPROM (Python parser)
+- parse_rpi_hat_eeprom_dll():Read and parse RPi HAT EEPROM (C DLL parser - faster)
 """
+
 
 import ctypes
 import time
@@ -135,10 +137,40 @@ class MaxUsbTool:
 		
 		time.sleep(0.1)
 
+		self.slave_address = self.scan_eeprom_devices()
+		if self.slave_address is None:
+			self.libMPSSE.I2C_CloseChannel(self.channel.handle)
+			raise RuntimeError('ERROR: No EEPROM found in range 0x50-0x57. Please check connections and ensure EEPROM is powered.')
+
 	def __del__(self):
 		if hasattr(self, 'channel'):
 			ret = self.libMPSSE.I2C_CloseChannel(self.channel.handle)
 			print(f'CloseChannel() {self.channel.name} (status {status(ret)})')
+
+	def scan_eeprom_devices(self):
+		"""
+		Scan for EEPROM devices in the typical address range (0x50-0x57).
+		This range covers common EEPROM addresses:
+		- 0x50-0x53: Standard EEPROMs with A0, A1 address pins
+		- 0x54-0x57: Alternative EEPROM configurations
+		
+		Returns:
+			int: First EEPROM address found, or None if no device found
+		"""
+		print('\nScanning for EEPROM devices (0x50-0x57)...')
+		
+		for addr in range(0x50, 0x58):
+			test_buf = (ctypes.c_ubyte * 1)()
+			transferred = ctypes.c_ulong()
+			test_mode = START_BIT | STOP_BIT
+			ret = self.libMPSSE.I2C_DeviceRead(self.channel.handle, addr, 1, test_buf, 
+										ctypes.byref(transferred), test_mode)
+			if ret == 0:
+				print(f'Using EEPROM at address 0x{addr:02x}\n')
+				return addr
+		
+		print('No EEPROM devices found in range 0x50-0x57\n')
+		return None
 
 	def set_slave_address(self, address):
 		"""
@@ -601,6 +633,11 @@ class MaxUsbTool:
 			print(f'\nHeader Info:')
 			print(f'  Signature: {header["signature"]}')
 			print(f'  Version: 0x{header["version"]:02x}')
+
+			if header["version"] != 0x02:
+				print(f'  [WARNING] Unexpected version: expected 0x02, got 0x{header["version"]:02x}')
+				return -1
+			
 			print(f'  Number of Atoms: {header["numatoms"]}')
 			print(f'  EEPROM Length: {header["eeplen"]} bytes')
 
